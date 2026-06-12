@@ -70,10 +70,108 @@ movement handler.
 - run creation and deletion
 - `home` command with `waitUntilComplete=true`
 - `robot/moveTo` absolute mount movement at high Z
+- Raspberry Pi 5 to OT-2 bridge over a USB Ethernet adapter
+- OT-2 lights endpoint: `GET /robot/lights`, `POST /robot/lights`
 - MQTT connection/subscription with no messages during the test window
 
 Not yet verified: protocol upload/execution, tip pickup/drop, plunger movement,
 aspirate/dispense, labware offsets, module control, and camera capture.
+
+## Raspberry Pi to OT-2 Bridge
+
+On 2026-06-12, `raspi-codex` was used as the network bridge to the live OT-2.
+The OT-2 was connected to the Pi through a TP-Link USB Ethernet adapter:
+
+- USB device: `2357:0601 TP-Link UE300 10/100/1000 LAN`
+- Pi interface: `eth1`
+- interface state observed: link up, 100 Mbps
+- OT-2 address reached from the Pi: `169.254.126.66`
+- temporary Pi link-local address used: `169.254.200.1/16`
+
+NetworkManager may keep trying DHCP on `eth1` and may remove the temporary
+address. If robot requests time out, restore the temporary address first:
+
+```sh
+ssh yasha@raspi-codex 'sudo ip addr add 169.254.200.1/16 dev eth1 2>/dev/null || true'
+ssh yasha@raspi-codex 'ping -c 1 -W 1 -I eth1 169.254.126.66'
+```
+
+To use this repo's local `opentrons_tools` through the Pi, open an SSH tunnel
+from the Mac to the OT-2 HTTP API:
+
+```sh
+ssh -f -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+  -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:31951:169.254.126.66:31950 \
+  yasha@raspi-codex
+```
+
+Then point the tools at the tunnel:
+
+```sh
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 health
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 get /runs
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 get /modules
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 get /instruments
+```
+
+Local network access from Codex may require sandbox escalation even though the
+target is `127.0.0.1`, because the port is an SSH tunnel to the robot.
+
+Lights were tested with:
+
+```sh
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 get /robot/lights
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 \
+  request POST /robot/lights --body-json '{"on": true}' \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+```
+
+For movement over this bridge, use a longer timeout. Homing took about 18-23
+seconds in the 2026-06-12 test, so the default 10 second client timeout can
+expire even when the robot command succeeds. Inspect run commands before sending
+additional movement if a timeout happens.
+
+The successful 2026-06-12 bridge movement sequence was:
+
+```sh
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 \
+  create-run --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  home <run-id> --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  move-mount <run-id> left --x 200 --y 150 --z 150 --speed 20 \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  move-mount <run-id> left --x 210 --y 150 --z 150 --speed 20 \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  move-mount <run-id> left --x 210 --y 160 --z 150 --speed 20 \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  move-mount <run-id> left --x 200 --y 160 --z 150 --speed 20 \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  move-mount <run-id> left --x 200 --y 150 --z 150 --speed 20 \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  home <run-id> --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 --timeout 60 \
+  delete-run <run-id> --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 get /runs
+```
+
+In the verified run, the temporary run was deleted afterward and `/runs`
+returned an empty list. Lights were left on at the user's request.
 
 ## Raspberry Pi 5 USB Bootstrap Notes
 
