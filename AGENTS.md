@@ -72,10 +72,12 @@ movement handler.
 - `robot/moveTo` absolute mount movement at high Z
 - Raspberry Pi 5 to OT-2 bridge over a USB Ethernet adapter
 - OT-2 lights endpoint: `GET /robot/lights`, `POST /robot/lights`
+- USB camera capture from the Raspberry Pi using V4L2 tools
 - MQTT connection/subscription with no messages during the test window
 
-Not yet verified: protocol upload/execution, tip pickup/drop, plunger movement,
-aspirate/dispense, labware offsets, module control, and camera capture.
+Not yet safely verified: protocol execution that touches labware, tip
+pickup/drop, plunger movement, aspirate/dispense, labware offsets, module
+control, and any vision-derived hardware action.
 
 ## Raspberry Pi to OT-2 Bridge
 
@@ -172,6 +174,72 @@ python3 -B -m opentrons_tools --host 127.0.0.1 --port 31951 get /runs
 
 In the verified run, the temporary run was deleted afterward and `/runs`
 returned an empty list. Lights were left on at the user's request.
+
+## Vision-Guided Tip Movement Incident
+
+On 2026-06-12, the agent attempted to use the Raspberry Pi camera image to
+identify missing tips in a default 200 uL filter tip rack and move tips into the
+empty slots on the OT-2. The user explicitly confirmed:
+
+```text
+Deck is clear. ACTIONS_CAN_MOVE_HARDWARE
+```
+
+The agent captured and inspected camera images, identified likely empty rack
+positions, then generated and uploaded a temporary protocol that assumed a
+specific rack slot and orientation. The protocol was started, but the user
+stopped/power-cycled the robot because the camera position was off and the
+planned mapping was wrong.
+
+What went wrong:
+
+- The agent inferred robot-actionable well positions directly from a camera
+  image.
+- There was no calibrated transform between camera pixels and OT-2 deck or
+  labware coordinates.
+- The agent assumed the rack slot, deck orientation, image orientation, rack
+  model, and well mapping were all correct.
+- The visual empty-tip detection was treated as sufficient for movement before
+  doing a physical proof step.
+
+Do not repeat this pattern. A visually plausible image is not enough to move
+hardware into wells or pick up/drop tips.
+
+After the emergency stop/power cycle, the OT-2 API temporarily returned `502
+Bad Gateway` from the main API while the update server was still reachable. The
+recovery path was:
+
+1. Confirm the robot through the Raspberry Pi bridge.
+2. Restart the OT-2 API with `POST /server/restart`.
+3. Wait for `health` to return OK.
+4. Inspect `/runs`; the interrupted run appeared as stopped with corrupt engine
+   state.
+5. Delete the interrupted run.
+6. Reconfirm `Deck is clear. ACTIONS_CAN_MOVE_HARDWARE` before moving.
+7. Create a temporary recovery run, run `home`, delete the recovery run, and
+   re-check `/runs`.
+
+Required workflow before any future vision-guided tip, labware, or liquid
+handling operation:
+
+1. Run read-only checks: `health`, `get /runs`, `get /modules`, and
+   `get /instruments`.
+2. Confirm the exact labware slot, labware definition, and physical orientation.
+   If this comes from vision, use fiducials or known wells, not inference alone.
+3. Capture a focused raw image with deck lights on. Avoid relying on heavy
+   image postprocessing for the final movement decision.
+4. Calibrate the camera image to deck or labware coordinates using known
+   fiducials/wells. Record the transform and expected error before moving.
+5. Generate/simulate the protocol and inspect the planned commands.
+6. Do a no-contact high-Z preview over the target wells and get camera or human
+   confirmation that the robot is over the expected physical locations.
+7. Perform one sacrificial pickup/drop or equivalent single-well proof step.
+8. Capture and inspect another image to verify the proof step.
+9. Only then run the full operation.
+
+Hard rule: do not execute vision-derived tip movement, labware movement, or
+liquid handling from image observation alone. Calibration and a single-step
+physical proof are mandatory.
 
 ## Raspberry Pi 5 USB Bootstrap Notes
 
