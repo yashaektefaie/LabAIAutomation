@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 ot-tools = "opentrons_tools.cli:main"
+hamilton-tools = "hamilton_tools.cli:main"
 opentrons-agent = "opentrons_agent.cli:main"
 opentrons-agent-web = "opentrons_agent.web:main"
 opentrons-agent-api = "opentrons_agent.agent_cli:main"
