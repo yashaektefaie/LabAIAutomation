@@ -1,3 +1,16 @@
+# Lab AI Automation — Robot Agent Tools
+
+Small local tools for inspecting and driving lab liquid handlers through the same
+robot-facing interfaces used by their desktop apps. Two instrument families are
+supported today:
+
+- **Opentrons** OT-2 / Flex — `opentrons_tools` (HTTP API on port 31950) — see below.
+- **Hamilton Microlab Prep** — `hamilton_tools` (REST API with JWT auth) — see
+  [Hamilton Microlab Prep](#hamilton-microlab-prep). Full capability reference:
+  [`hamilton_tools/CAPABILITIES.md`](hamilton_tools/CAPABILITIES.md).
+
+---
+
 # Opentrons Agent Tools
 
 Small local tools for inspecting and driving Opentrons robots through the same
@@ -167,3 +180,114 @@ aspirate/dispense, labware offsets, module control, and camera capture.
   network path.
 - Do not run mutating commands unless the robot deck is clear and you intend to
   change robot state.
+
+---
+
+# Hamilton Microlab Prep
+
+`hamilton_tools` drives a Hamilton Microlab Prep through its native REST API
+(`http://<prep-ip>/api/v1/...`). Architecture mirrors `opentrons_tools`: a stdlib
+HTTP client, an argparse CLI, the same `--allow-action --confirm
+ACTIONS_CAN_MOVE_HARDWARE` safety gate for anything that mutates state or moves
+hardware, and JSON output on stdout.
+
+**What the machine can do is catalogued in
+[`hamilton_tools/CAPABILITIES.md`](hamilton_tools/CAPABILITIES.md)** — pipetting
+tools (the two roaming independent channels + the 8-channel head), step types,
+integrated devices (Heater-Shaker/Cooler, HEPA/UV, lighting), gripper/transport,
+camera/vision, calibration, diagnostics, and the full run lifecycle. Read that
+file first when planning a protocol.
+
+The Prep API differs from Opentrons in one important way: it uses **JWT
+authentication**. Log in once, then pass the token on every call.
+
+## First Checks
+
+```sh
+# Authenticate (prompts for password if not given); prints the JWT token
+python3 -m hamilton_tools --host 192.168.1.50 login --username labuser
+
+export HAMILTON_HOST=192.168.1.50
+export HAMILTON_TOKEN=<token-from-login>
+
+python3 -m hamilton_tools system-ready
+python3 -m hamilton_tools snapshot
+python3 -m hamilton_tools instruments
+python3 -m hamilton_tools run-state
+```
+
+Defaults are read from `HAMILTON_HOST`, `HAMILTON_PORT`, `HAMILTON_TOKEN`,
+`HAMILTON_TIMEOUT`, and `HAMILTON_HTTPS`. The `login` subcommand also reads
+`HAMILTON_USER` / `HAMILTON_PASSWORD`.
+
+## Safe Motion Command
+
+The equivalent of Opentrons homing is **`initialize`**, which homes all axes to a
+known safe position. It is the first motion to run on a clear deck:
+
+```sh
+python3 -m hamilton_tools is-initialized          # read-only: false before
+python3 -m hamilton_tools initialize \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+python3 -m hamilton_tools run-state               # -> Initialized
+```
+
+## Protocols And Runs
+
+```sh
+python3 -m hamilton_tools list-protocols
+python3 -m hamilton_tools get-protocol 1
+python3 -m hamilton_tools validate-protocol 1
+python3 -m hamilton_tools preview-protocol 1
+
+# Execute: create run -> load -> (runs) -> cleanup
+python3 -m hamilton_tools create-run 1 \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+python3 -m hamilton_tools load-instructions
+python3 -m hamilton_tools load-complete \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -m hamilton_tools pause  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+python3 -m hamilton_tools resume --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+python3 -m hamilton_tools abort  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+
+python3 -m hamilton_tools list-run-data
+python3 -m hamilton_tools get-run-data <run-data-id>
+```
+
+## Choosing the pipetting tool
+
+Pipetting happens inside protocol steps; each step's `channelSelection` picks the
+tool: `OneChannel` / `TwoChannel` (the roaming independent channels) or
+`EightChannel` (the MPH). Both can be used across one protocol — one tool per
+step. Add a step with the generic `request` command:
+
+```sh
+python3 -m hamilton_tools request POST /api/v1/protocols/1/step \
+  --body-json '{"stepType":"TransferSamples","name":"stamp col","channelSelection":"EightChannel"}' \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+```
+
+(See `CAPABILITIES.md` §3–§4 for full step bodies and pipetting settings.)
+
+## Generic API
+
+Any endpoint in the spec is reachable directly:
+
+```sh
+python3 -m hamilton_tools get /api/v1/diagnostics
+python3 -m hamilton_tools request PUT /api/v1/thermal-device/hhc/start-temperature-control \
+  --body-json '{"temperature":37.0}' \
+  --allow-action --confirm ACTIONS_CAN_MOVE_HARDWARE
+```
+
+## Notes
+
+- The Prep exposes no ad-hoc move/aspirate calls — all liquid handling is authored
+  as protocol steps and executed as a run. See `CAPABILITIES.md` §2.
+- JWT tokens expire (~5 min). Use `renew-token` or re-`login` for long sessions.
+- Without hardware, point the API at the built-in mock instrument (`use-mock`).
+- The repo's `venus api.json` is a *separate* API for STAR/Vantage robots and does
+  not apply to the Prep (CAPABILITIES.md §14).
+- Do not run mutating commands unless the deck is clear and you intend to change
+  instrument state.
